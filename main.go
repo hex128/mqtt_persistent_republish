@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -77,6 +78,9 @@ func main() {
 		srcOpts.SetTLSConfig(&srcTlsConfig)
 	}
 	srcOpts.AddBroker(srcBroker)
+	srcOpts.SetAutoReconnect(true)
+	srcOpts.SetConnectRetry(true)
+	srcOpts.SetKeepAlive(15 * time.Second)
 	if srcMqttUser != "" && srcMqttPass != "" {
 		srcOpts.SetUsername(srcMqttUser)
 		srcOpts.SetPassword(srcMqttPass)
@@ -89,26 +93,47 @@ func main() {
 		dstOpts.SetTLSConfig(&dstTlsConfig)
 	}
 	dstOpts.AddBroker(dstBroker)
+	dstOpts.SetAutoReconnect(true)
+	dstOpts.SetConnectRetry(true)
+	dstOpts.SetKeepAlive(15 * time.Second)
 	if dstMqttUser != "" && dstMqttPass != "" {
 		dstOpts.SetUsername(dstMqttUser)
 		dstOpts.SetPassword(dstMqttPass)
 	}
 
+	dstOpts.SetOnConnectHandler(func(client mqtt.Client) {
+		log.Printf("Connected to %s", dstBroker)
+	})
+	dstOpts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+		log.Printf("Connection to %s lost: %v", dstBroker, err)
+	})
+	dstClient := mqtt.NewClient(dstOpts)
+
+	srcOpts.SetOnConnectHandler(func(client mqtt.Client) {
+		log.Printf("Connected to %s", srcBroker)
+		log.Printf("Subscribing to %s/%s", srcBroker, srcPrefix+"#")
+		client.Subscribe(srcPrefix+"#", 0, func(client mqtt.Client, msg mqtt.Message) {
+			log.Printf("Received message on %s/%s", srcBroker, msg.Topic())
+			newTopic := dstPrefix + strings.TrimPrefix(msg.Topic(), srcPrefix)
+			log.Printf("Republishing message to %s/%s", dstBroker, newTopic)
+			token := dstClient.Publish(newTopic, msg.Qos(), true, msg.Payload())
+			token.Wait()
+		})
+	})
+	srcOpts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+		log.Printf("Connection to %s lost: %v", srcBroker, err)
+	})
 	srcClient := mqtt.NewClient(srcOpts)
+
+	log.Printf("Connecting to %s", srcBroker)
 	if token := srcClient.Connect(); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
 
-	dstClient := mqtt.NewClient(dstOpts)
+	log.Printf("Connecting to %s", dstBroker)
 	if token := dstClient.Connect(); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
-
-	srcClient.Subscribe(srcPrefix+"#", 0, func(client mqtt.Client, msg mqtt.Message) {
-		newTopic := dstPrefix + strings.TrimPrefix(msg.Topic(), srcPrefix)
-		token := dstClient.Publish(newTopic, msg.Qos(), true, msg.Payload())
-		token.Wait()
-	})
 
 	select {}
 }
